@@ -1,6 +1,7 @@
 package lighthouse;
 
 import com.google.common.base.*;
+import com.google.common.util.concurrent.*;
 import com.vinumeris.crashfx.*;
 import com.vinumeris.updatefx.*;
 import javafx.animation.*;
@@ -32,10 +33,11 @@ import org.bitcoinj.core.*;
 import org.bitcoinj.params.*;
 import org.bitcoinj.utils.*;
 import org.bouncycastle.math.ec.*;
+import org.jetbrains.annotations.*;
 import org.slf4j.Logger;
 import org.slf4j.*;
 
-import javax.annotation.*;
+import javax.annotation.Nullable;
 import java.io.*;
 import java.net.*;
 import java.nio.file.*;
@@ -187,7 +189,7 @@ public class Main extends Application {
                     }
                 }
 
-                runOnGuiThreadAfter(500, WalletSetPasswordController::estimateKeyDerivationTime);
+                runOnGuiThreadAfter(3000, WalletSetPasswordController::estimateKeyDerivationTime);
 
                 // And now start up the network code and backend (trigger project checks) as the last step.
                 DownloadProgressTracker downloadProgressTracker = MainWindow.bitcoinUIModel.getDownloadListener();
@@ -195,7 +197,8 @@ public class Main extends Application {
                     @Override
                     public void run() {
                         bitcoin.start(downloadProgressTracker);
-                        backend.start();
+                        if (!bitcoin.isOffline())
+                            backend.start();
                     }
                 }.start();
             } catch (Exception e) {
@@ -205,6 +208,7 @@ public class Main extends Application {
         };
         // Give the splash time to render (lame hack as it turns out we can easily stall the splash rendering otherwise).
         runOnGuiThreadAfter(300, setup);
+        //setup.run();
     }
 
     private void performInitialAutoUpdate(List<Path> filesToOpen) {
@@ -348,6 +352,7 @@ public class Main extends Application {
 
         scene = new Scene(uiStack);
         scene.getAccelerators().put(KeyCombination.valueOf("Shortcut+S"), () -> Platform.runLater(this::loadMainWindow));
+        scene.getAccelerators().put(KeyCombination.valueOf("Shortcut+C"), () -> Platform.runLater(() -> refreshStylesheets(scene)));
         refreshStylesheets(scene);
         stage.setTitle(APP_NAME);
         stage.setMinWidth(800);
@@ -382,6 +387,7 @@ public class Main extends Application {
     private boolean initialUILoad = true;
     private void loadMainWindow() {
         try {
+            refreshStylesheets(scene);
             // Load the main window.
             FXMLLoader loader = new FXMLLoader(getResource("main.fxml"), I18nUtil.translations);
             Pane ui = LHUtils.stopwatched("Loading main.fxml", loader::load);
@@ -422,16 +428,22 @@ public class Main extends Application {
         // we give to the app kit is currently an exception and runs on a library thread. It'll get fixed in
         // a future version.
         Threading.USER_THREAD = Platform::runLater;
-        Context ctx = new Context(params);
+        Threading.setPolicy(CycleDetectingLockFactory.Policies.DISABLED);
         try {
-            bitcoin = new BitcoinBackend(ctx, APP_NAME, "" + VERSION, cmdLineRequestedIPs, useTor);
+            Context bitcoinCtx = new Context(params);
+            long now = System.currentTimeMillis();
+            bitcoin = new BitcoinBackend(bitcoinCtx, APP_NAME, "" + VERSION, cmdLineRequestedIPs, useTor);
+            log.info("bitcoin init took {}msec", System.currentTimeMillis() - now);
             wallet = bitcoin.getWallet();
-            backend = new LighthouseBackend(CLIENT, bitcoin.getPeers(), bitcoin.getXtPeers(), bitcoin.getChain(), bitcoin.getWallet(), new AffinityExecutor.ServiceAffinityExecutor("backend"));
+            backend = new LighthouseBackend(CLIENT, params, bitcoin, new AffinityExecutor.ServiceAffinityExecutor("backend"));
             return true;
-        } catch (ChainFileLockedException ex) {
+        } catch (ChainFileLockedException e) {
             informationalAlert(tr("Already running"),
                     tr("This application is already running and cannot be started twice."));
             Platform.exit();
+            return false;
+        } catch (Exception e) {
+            CrashWindow.open(e);
             return false;
         }
     }
@@ -572,28 +584,33 @@ public class Main extends Application {
             Pane ui = loader.load();
             T controller = loader.getController();
 
-            EmbeddedWindow window = null;
-            if (title != null)
-                ui = window = new EmbeddedWindow(title, ui);
-
-            OverlayUI<T> pair = new OverlayUI<T>(ui, controller);
-            // Auto-magically set the overlayUi member, if it's there.
-            try {
-                if (controller != null)
-                    controller.getClass().getField("overlayUI").set(controller, pair);
-            } catch (IllegalAccessException | NoSuchFieldException ignored) {
-                ignored.printStackTrace();
-            }
-
-            if (window != null)
-                window.setOnCloseClicked(pair::done);
-
-            log.info("Showing window {} / {}", name, title != null ? title : "(untitled)");
-            pair.show();
-            return pair;
+            return overlayUI(title, ui, controller);
         } catch (IOException e) {
             throw new RuntimeException(e);  // Can't happen.
         }
+    }
+
+    @NotNull
+    public <T> OverlayUI<T> overlayUI(@Nullable String title, Pane ui, T controller) {
+        EmbeddedWindow window = null;
+        if (title != null)
+            ui = window = new EmbeddedWindow(title, ui);
+
+        OverlayUI<T> pair = new OverlayUI<T>(ui, controller);
+        // Auto-magically set the overlayUi member, if it's there.
+        try {
+            if (controller != null)
+                controller.getClass().getField("overlayUI").set(controller, pair);
+        } catch (IllegalAccessException | NoSuchFieldException ignored) {
+            ignored.printStackTrace();
+        }
+
+        if (window != null)
+            window.setOnCloseClicked(pair::done);
+
+        log.info("Showing window {}", title != null ? title : "(untitled)");
+        pair.show();
+        return pair;
     }
 
     @Override

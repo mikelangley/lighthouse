@@ -18,6 +18,7 @@ import lighthouse.activities.*;
 import lighthouse.controls.*;
 import lighthouse.model.*;
 import lighthouse.nav.*;
+import lighthouse.protocol.*;
 import lighthouse.subwindows.*;
 import lighthouse.utils.*;
 import org.bitcoinj.core.*;
@@ -61,6 +62,7 @@ public class MainWindow {
 
     // Called by FXMLLoader.
     public void initialize() {
+        Main.reached("MainWindow.initialize()");
         AwesomeDude.setIcon(emptyWalletBtn, AwesomeIcon.SIGN_OUT, "12pt", ContentDisplay.LEFT);
         Tooltip.install(emptyWalletBtn, new Tooltip(tr("Send money out of the wallet")));
         AwesomeDude.setIcon(setupWalletBtn, AwesomeIcon.LOCK, "12pt", ContentDisplay.LEFT);
@@ -68,9 +70,8 @@ public class MainWindow {
 
         AwesomeDude.setIcon(menuBtn, AwesomeIcon.BARS);
 
-        log.info("Proceeding with UI setup!");
 
-        overviewActivity = new OverviewActivity();
+        LHUtils.stopwatch("Build overview activity", () -> overviewActivity = new OverviewActivity());
         navManager = new NavManager(contentScrollPane, overviewActivity);
 
         // Slide back button in/out.
@@ -134,7 +135,8 @@ public class MainWindow {
                 public void invalidated(Observable ob) {
                     Platform.runLater(() -> {
                         if (Main.bitcoin.isOffline()) {
-                            item = Main.instance.notificationBar.displayNewItem(tr("You are offline. You will not be able to use the app until you go online and restart."));
+                            item = Main.instance.notificationBar.displayNewItem(
+                                    tr("You are offline. You will not be able to use the app until you go online and restart."));
                             emptyWalletBtn.disableProperty().unbind();
                             emptyWalletBtn.setDisable(true);
                         } else {
@@ -171,8 +173,6 @@ public class MainWindow {
     }
 
     private void setupBitcoinSyncNotification() {
-        if (Main.bitcoin.isOffline())
-            return;
         balance.setStyle("-fx-text-fill: grey");
         TorClient torClient = Main.bitcoin.getPeers().getTorClient();
         if (torClient != null) {
@@ -196,8 +196,6 @@ public class MainWindow {
                     });
                 }
             });
-        } else {
-            showBitcoinSyncMessage();
         }
         bitcoinUIModel.syncProgressProperty().addListener(x -> {
             double progress = bitcoinUIModel.syncProgressProperty().get();
@@ -210,7 +208,7 @@ public class MainWindow {
                         balance.setStyle("-fx-text-fill: black");
                     });
                 }
-            } else if (syncItem == null && progress < 1.0) {
+            } else if (syncItem == null && progress > 0.0 && progress < 1.0) {
                 showBitcoinSyncMessage();
             }
         });
