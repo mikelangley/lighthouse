@@ -44,8 +44,17 @@ message ProjectExtraDetails {
     // be overridable in server assisted cases.
     // TODO: Make required after alpha users have upgraded and no more alpha projects are hanging around.
     optional int64 min_pledge_size = 4;
-
     optional string email = 5;
+}
+
+// Add P2P Lending data to the project
+message ProjectLoanDetails {
+
+    // Interest rate is a percentage of Output amount.
+    required int64 interest_rate = 1;
+
+    // Repayment period is the number of days from one repayment to the next repayment.
+    required int64 repayment_period_days = 2;
 }
 
 // Data used only by the owner. This format may change arbitrarily between Lighthouse versions or be totally different
@@ -70,6 +79,7 @@ message ProjectDetails {
     optional bytes merchant_data = 7;   // If present, serialized OwnerData.
 
     required ProjectExtraDetails extra_details = 101;
+    optional ProjectLoanDetails project_loan_details = 102;
 }
 
 message Project {
@@ -98,6 +108,13 @@ message PledgeDetails {
     optional bytes orig_hash = 6;
     // Name or pseudonym. This is public data.
     optional string name = 7;
+
+}
+
+// Add P2P Lending data to the pledge
+message PledgeLoanDetails {
+    // Adding BIP32 pubkey used to send loan repayments to the lender(s)
+    required bytes repayment_bip32_pubkey = 1;
 }
 
 // Modified Payment message.
@@ -114,6 +131,7 @@ message Pledge {
     repeated Output refund_to = 3;
 
     optional PledgeDetails pledge_details = 100;
+    optional PledgeLoanDetails pledge_loan_details = 101;
 }
 
 message PledgeACK {
