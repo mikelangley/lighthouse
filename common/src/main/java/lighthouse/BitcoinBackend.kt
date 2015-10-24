@@ -6,6 +6,8 @@ import javafx.beans.property.SimpleBooleanProperty
 import lighthouse.files.AppDirectory
 import lighthouse.wallet.PledgingWallet
 import org.bitcoinj.core.*
+import org.bitcoinj.core.listeners.AbstractPeerEventListener
+import org.bitcoinj.core.listeners.PeerDataEventListener
 import org.bitcoinj.kits.WalletAppKit
 import org.bitcoinj.net.discovery.DnsDiscovery
 import org.bitcoinj.net.discovery.HttpDiscovery
@@ -37,37 +39,26 @@ interface IBitcoinBackend {
 /**
  * Class that does similar things to WalletAppKit, but more customised for our needs.
  */
-public class BitcoinBackend @throws(ChainFileLockedException::class) constructor(val context: Context,
+public class BitcoinBackend @Throws(ChainFileLockedException::class) constructor(val context: Context,
                                                                                  val appName: String,
                                                                                  val appVersion: String,
                                                                                  val cmdLineRequestedIPs: List<String>?,
                                                                                  val useTor: Boolean) : IBitcoinBackend {
     private val log = LoggerFactory.getLogger(javaClass)
 
-    public val params: NetworkParameters = context.getParams()
-    public override var wallet: PledgingWallet
-    public override var store: BlockStore
-    public override var chain: BlockChain
-    public override var peers: PeerGroup
-    public override var xtPeers: PeerGroup
+    public val params: NetworkParameters = context.params
 
+    private val chainFile: File = AppDirectory.dir().resolve("$appName.spvchain").toFile()
+    private val walletFile: File = AppDirectory.dir().resolve("$appName.wallet").toFile()
+
+    public override var wallet: PledgingWallet = createOrLoadWallet(walletFile, walletFile.exists() and !chainFile.exists())
+    public override var store: BlockStore = initializeChainStore(chainFile)
+    public override var chain: BlockChain = BlockChain(context, wallet, store)
+    public override var peers: PeerGroup = createPeerGroup()
+
+    public override var xtPeers: PeerGroup = createXTPeers()
     public val localNodeUnusable: SimpleBooleanProperty = SimpleBooleanProperty()
     public val offline: SimpleBooleanProperty = SimpleBooleanProperty()
-
-    private val walletFile: File
-    private val chainFile: File
-
-    init {
-        chainFile = AppDirectory.dir().resolve("$appName.spvchain").toFile()
-        walletFile = AppDirectory.dir().resolve("$appName.wallet").toFile()
-        // Deleted chain file means, reset and try again.
-        val shouldReplayWallet = walletFile.exists() and !chainFile.exists()
-        $wallet = createOrLoadWallet(walletFile, shouldReplayWallet)
-        $store = initializeChainStore(chainFile)
-        $chain = BlockChain(context, wallet, store)
-        $peers = createPeerGroup()
-        $xtPeers = createXTPeers()
-    }
 
     private fun createXTPeers(): PeerGroup {
         val NUM_XT_PEERS = 4
@@ -78,11 +69,11 @@ public class BitcoinBackend @throws(ChainFileLockedException::class) constructor
                 // PeerGroup will use a local Bitcoin node if at all possible, but it may not have what we need.
                 addEventListener(object : AbstractPeerEventListener() {
                     override fun onPeerConnected(peer: Peer, peerCount: Int) {
-                        if (peer.getAddress().getAddr().isLoopbackAddress() && !peer.getPeerVersionMessage().isGetUTXOsSupported()) {
+                        if (peer.address.addr.isLoopbackAddress && !peer.peerVersionMessage.isGetUTXOsSupported) {
                             // We connected to localhost but it doesn't have what we need.
                             log.warn("Localhost peer does not have support for NODE_GETUTXOS, ignoring")
-                            setUseLocalhostPeerWhenPossible(false)
-                            setMaxConnections(NUM_XT_PEERS)
+                            useLocalhostPeerWhenPossible = false
+                            maxConnections = NUM_XT_PEERS
                             peer.close()
                             localNodeUnusable.set(true)
                         }
@@ -100,7 +91,7 @@ public class BitcoinBackend @throws(ChainFileLockedException::class) constructor
                 val authKey = ECKey.fromPublicOnly(BaseEncoding.base16().decode("027a79143a4de36341494d21b6593015af6b2500e720ad2eda1c0b78165f4f38c4".toUpperCase()))
                 addPeerDiscovery(HttpDiscovery(params, uri, authKey))
                 setConnectTimeoutMillis(10000)
-                setMaxConnections(NUM_XT_PEERS)
+                maxConnections = NUM_XT_PEERS
                 setUserAgent(appName, appVersion)
                 this
             }
@@ -111,10 +102,10 @@ public class BitcoinBackend @throws(ChainFileLockedException::class) constructor
         val pg = if (!useTor) {
             with(PeerGroup(context, chain)) {
                 if (params === RegTestParams.get()) {
-                    addAddress(PeerAddress(InetAddress.getLocalHost(), RegTestParams.get().getPort()))
-                    addAddress(PeerAddress(InetAddress.getLocalHost(), RegTestParams.get().getPort() + 1))
-                    setMinBroadcastConnections(2)
-                    setUseLocalhostPeerWhenPossible(false)
+                    addAddress(PeerAddress(InetAddress.getLocalHost(), RegTestParams.get().port))
+                    addAddress(PeerAddress(InetAddress.getLocalHost(), RegTestParams.get().port + 1))
+                    minBroadcastConnections = 2
+                    useLocalhostPeerWhenPossible = false
                 } else if (params === UnitTestParams.get()) {
                     // Do nothing
                 } else {
@@ -129,7 +120,7 @@ public class BitcoinBackend @throws(ChainFileLockedException::class) constructor
             }
         } else {
             val torClient = TorClient()
-            torClient.getConfig().setDataDirectory(AppDirectory.dir().toFile())
+            torClient.config.dataDirectory = AppDirectory.dir().toFile()
             PeerGroup.newWithTor(context, chain, torClient)
         }
 
@@ -144,8 +135,8 @@ public class BitcoinBackend @throws(ChainFileLockedException::class) constructor
             val store = SPVBlockStore(params, file)
             if (fileIsNew) {
                 // We need to checkpoint the new file to speed initial sync.
-                val time = newSeed?.getCreationTimeSeconds() ?: wallet.getEarliestKeyCreationTime()
-                val stream = javaClass<WalletAppKit>().getResourceAsStream("/" + params.getId() + ".checkpoints")
+                val time = newSeed?.creationTimeSeconds ?: wallet.earliestKeyCreationTime
+                val stream = WalletAppKit::class.java.getResourceAsStream("/" + params.id + ".checkpoints")
                 if (stream != null) {
                     CheckpointManager.checkpoint(params, stream, store, time)
                     stream.close()
@@ -183,9 +174,9 @@ public class BitcoinBackend @throws(ChainFileLockedException::class) constructor
 
     private fun moveOldWalletToBackup() {
         var counter = 1
-        val newName: File
+        var newName: File
         do {
-            newName = File(walletFile.getParent(), "Backup " + counter + " for " + walletFile.getName())
+            newName = File(walletFile.getParent(), "Backup " + counter + " for " + walletFile.name)
             counter++
         } while (newName.exists())
         log.info("Renaming old wallet file $walletFile to $newName")
@@ -195,15 +186,15 @@ public class BitcoinBackend @throws(ChainFileLockedException::class) constructor
         }
     }
 
-    private volatile var running: Boolean = false
-    private var downloadListener: PeerEventListener? = null
+    private @Volatile var running: Boolean = false
+    private var downloadListener: PeerDataEventListener? = null
 
-    public fun start(downloadListener: PeerEventListener) {
+    public fun start(downloadListener: PeerDataEventListener) {
         log.info("Start request received")
         this.downloadListener = downloadListener
         // Assume google.com is the most reliable DNS name in the world.
         log.info("Doing google.com DNS check to see if we're online")
-        if (InetSocketAddress("google.com", 80).getAddress() == null) {
+        if (InetSocketAddress("google.com", 80).address == null) {
             log.warn("User appears to be offline")
             synchronized(offline) {
                 offline.set(true)
